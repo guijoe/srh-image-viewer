@@ -145,6 +145,102 @@ class Retro(BaseParamsWidget):
             'fact': self.fact_spinbox.value(),
             'nB': self.nB_spinbox.value(),
         }
+    
+class LensDistortion(BaseParamsWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # these will be filled once an image is shown
+        self.width = 0
+        self.height = 0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+         # Input for the new y value
+        layout.addWidget(QLabel("X Coordinates:"))
+        self.yD_spinbox = QDoubleSpinBox()
+        self.yD_spinbox.setMinimum(0.0)
+        self.yD_spinbox.setMaximum(0.0)
+        self.yD_spinbox.setValue(-1.0)
+        self.yD_spinbox.setSingleStep(1.0)
+        layout.addWidget(self.yD_spinbox)
+
+        # Input for the new x value
+        layout.addWidget(QLabel("Y Coordinates:"))
+        self.xD_spinbox = QDoubleSpinBox()
+        self.xD_spinbox.setMinimum(0.0)
+        self.xD_spinbox.setMaximum(0.0)
+        self.xD_spinbox.setValue(-1.0)
+        self.xD_spinbox.setSingleStep(1.0)
+        layout.addWidget(self.xD_spinbox)
+
+
+        # Input for the new maximum value
+        layout.addWidget(QLabel("Scale (barrel + / pincushion -):"))
+        self.Scale_spinbox = QDoubleSpinBox()
+        self.Scale_spinbox.setMinimum(0.1)
+        self.Scale_spinbox.setMaximum(2.0) # Arbitrary large value, will be updated in ``set_image_size``
+        self.Scale_spinbox.setValue(0.11)
+        self.Scale_spinbox.setSingleStep(0.1)
+        layout.addWidget(self.Scale_spinbox)
+
+        layout.addWidget(QLabel("Strength:"))
+        self.k_spinbox = QDoubleSpinBox()
+        self.k_spinbox.setMinimum(-1.0)
+        self.k_spinbox.setMaximum(1.0)
+        self.k_spinbox.setValue(0.11)
+        self.k_spinbox.setSingleStep(0.15)
+        layout.addWidget(self.k_spinbox)
+
+        layout.addStretch()
+
+    def _auto_k_scale(self, width: int, height: int):
+        # 1) choose k based on resolution (keep your idea)
+        ref_size = 300.0
+        k_ref = -0.35
+        min_dim = max(1.0, float(min(width, height)))
+
+        k = k_ref * (ref_size / min_dim)
+        k = float(np.clip(k, -0.45, 0.45))
+
+        # 2) squished scale compensation (THIS is the key change)
+        lam = 0.22  # 0..1 ; try 0.15–0.30. 0.22 ≈ gives 1.09 when k≈-0.19
+        denom = 1.0 + 2.0 * k * lam
+        denom = max(0.25, denom)  # safety
+        scale = 1.0 / denom
+
+        # keep scale in a sane range (prevents dramatic smearing)
+        scale = float(np.clip(scale, 0.85, 1.25))
+        return k, scale
+
+    def set_image_size(self, width: int, height: int):
+        self.width = width
+        self.height = height
+
+        self.xD_spinbox.setMaximum(self.height) 
+        if self.xD_spinbox.value() == 0.0: 
+            self.xD_spinbox.setValue(self.height // 2) 
+        self.xD_spinbox.setSingleStep(self.height / 10)
+
+        self.yD_spinbox.setMaximum(self.width) 
+        if self.yD_spinbox.value() == 0.0: 
+            self.yD_spinbox.setValue(self.width // 2) 
+        self.yD_spinbox.setSingleStep(self.width / 10)
+
+        # AUTO TUNE k + Scale on load:
+        if self.k_spinbox.value() == 0.11 and self.Scale_spinbox.value() == 0.11:
+            k, scale = self._auto_k_scale(width, height)
+            self.k_spinbox.setValue(k)
+            self.Scale_spinbox.setValue(scale)
+
+    def get_params(self) -> dict:
+        return {
+            'xD': self.xD_spinbox.value(),
+            'yD': self.yD_spinbox.value(),
+            'Scale': self.Scale_spinbox.value(),
+            'k': self.k_spinbox.value(),
+        }
 
 # Define a custom control widget
 class Joaquin_SMSControlsWidget(QWidget):
@@ -200,7 +296,7 @@ class Joaquin_SMSControlsWidget(QWidget):
         operations = {
             "Shaded_Circle": Circle,
             "Retro_Pixelation": Retro,
-            
+            "Lens_Distortion": LensDistortion,
         }
 
         for name, widget_class in operations.items():
@@ -329,6 +425,47 @@ class Joaquin_SMSImageModule(IImageModule):
             rows, cols = input_float.shape[:2]
             processed_data = up[:rows, :cols] * 255.0
             # later the dtype cast will clip/convert to uint8
+        
+        elif operation == "Lens_Distortion":
+            # convert to float for any arithmetic and for computing default values
+            input_float = processed_data.astype(float)
+
+            img = processed_data
+            k1 = float(params.get("k", 0.15))
+            scale = float(params.get("Scale", 1.0))
+
+            H, W = input_float.shape[:2]
+            cy = params.get('xD', H // 2)
+            cx = params.get('yD', W // 2)
+
+            # Ensure we have (H,W,C) for consistent math
+            if img.ndim == 2:
+                img = img[..., None]
+
+            H, W, C = img.shape
+            yy, xx = np.indices((H, W))
+
+            x = (xx - cx) / (W * 0.5)
+            y = (yy - cy) / (H * 0.5)
+            r2 = x*x + y*y
+
+            # radial distortion model
+            factor = 1.0 + k1 * r2
+            xd = x * factor * scale
+            yd = y * factor * scale
+
+            # back to pixel coords
+            src_x = (xd * (W * 0.5) + cx).round().astype(np.int32)
+            src_y = (yd * (H * 0.5) + cy).round().astype(np.int32)
+
+            # clamp
+            src_x = np.clip(src_x, 0, W - 1)
+            src_y = np.clip(src_y, 0, H - 1)
+
+            out = img[src_y, src_x]  # (H,W,C)
+
+            # return original shape style
+            processed_data = out if processed_data.ndim == 3 else out[..., 0]
         
         # Ensure output data type is consistent (e.g., convert back to uint8 if processing changed it)
         processed_data = processed_data.astype(image_data.dtype)
