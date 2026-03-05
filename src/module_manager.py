@@ -1,9 +1,10 @@
-import os
+﻿import os
 import importlib
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QWidget
 from modules.i_image_module import IImageModule
 from image_data_store import ImageDataStore
+
 
 class ModuleManager(QObject):
     module_activated = Signal(str, QWidget) # module_name, control_widget
@@ -16,37 +17,52 @@ class ModuleManager(QObject):
         self._active_module: IImageModule = None
         self._load_modules_from_directory("modules") # Dynamically load
 
+    def _load_module_from_import_path(self, import_path: str):
+        module_spec = importlib.util.find_spec(import_path)
+        print("Module spec:", module_spec)
+        if not module_spec or not module_spec.loader:
+            return
+
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+
+        for attr_name in dir(module):
+            attr = getattr(module, attr_name)
+            if isinstance(attr, type) and issubclass(attr, IImageModule) and attr is not IImageModule:
+                module_instance = attr()
+                self.register_module(module_instance)
+                print(f"Loaded module: {module_instance.get_name()}")
+                break
+
     def _load_modules_from_directory(self, path):
+        base_dir = os.path.dirname(__file__)
+        modules_fs_path = os.path.join(base_dir, path)
         print("loading modules from repository")
         # This is a simplified dynamic loading. For production, consider entry points.
-        for item in os.listdir(path):
+        if not os.path.isdir(modules_fs_path):
+            print(f"Module directory not found: {modules_fs_path}")
+            return
+
+        for item in os.listdir(modules_fs_path):
             print(item)
-            module_path = os.path.join(path, item)
-            if os.path.isdir(module_path) and not item.startswith('__'):
-                try:
-                    # Attempt to import module_name.module_name_file
-                    # e.g., modules.two_d_images.two_d_module
+            module_path = os.path.join(modules_fs_path, item)
+            try:
+                if os.path.isdir(module_path) and not item.startswith('__'):
+                    # Attempt to import modules.<folder>.<folder>_module
                     module_name = item
                     print("Module name", module_name)
                     module_file_name = f"{item.replace('-', '_')}_module" # Convention: folder_name_module.py
-                    
-                    print(f"{path}.{module_name}.{module_file_name}")
-                    module_spec = importlib.util.find_spec(f"{path}.{module_name}.{module_file_name}")
-
-                    print("Module spec:", module_spec)
-                    if module_spec:
-                        module = importlib.util.module_from_spec(module_spec)
-                        module_spec.loader.exec_module(module)
-
-                        for attr_name in dir(module):
-                            attr = getattr(module, attr_name)
-                            if isinstance(attr, type) and issubclass(attr, IImageModule) and attr is not IImageModule:
-                                module_instance = attr()
-                                self.register_module(module_instance)
-                                print(f"Loaded module: {module_instance.get_name()}")
-                                break # Found the module class
-                except Exception as e:
-                    print(f"Could not load module {item}: {e}")
+                    import_path = f"{path}.{module_name}.{module_file_name}"
+                    print(import_path)
+                    self._load_module_from_import_path(import_path)
+                elif os.path.isfile(module_path) and item.endswith("_module.py") and item != "i_image_module.py":
+                    # Also allow flat modules directly under modules/ (e.g. modules.yassin_module)
+                    module_file_name = os.path.splitext(item)[0]
+                    import_path = f"{path}.{module_file_name}"
+                    print(import_path)
+                    self._load_module_from_import_path(import_path)
+            except Exception as e:
+                print(f"Could not load module {item}: {e}")
 
     def register_module(self, module: IImageModule):
         if module.get_name() in self._modules:
@@ -106,7 +122,7 @@ class ModuleManager(QObject):
 
         try:
             processed_data = self._active_module.process_image(current_data.copy(), current_meta.copy(), params)
-            
+
             # Don't update the main store, just the viewer, to keep original data for next processing
             processed_meta = current_meta.copy()
             processed_meta['layer_name'] = 'Processed'
