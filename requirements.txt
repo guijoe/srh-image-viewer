@@ -1,0 +1,7 @@
+PySide6 # or PyQt6
+numpy
+scipy
+scikit-image
+pydicom # For DICOM
+tifffile # For microscopy formats like OME-TIFF
+napari[all] # Installs napari with common backends for image loading
