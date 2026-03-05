@@ -215,7 +215,7 @@ Now, run the application. You should see your module in the module selection dro
 
 ## 4. Submitting Your Contribution
 
-Once you have tested and are happy with all functionalities implementated in your module, it is time to submit it for review (latest 17th for Group 1 and 18th for Group 2).
+Once you have tested and are happy with all functionalities implementated in your module, it is time to submit it for review (latest 17th for Group 1 and 6th for Group 2).
 
 ### 4.1. Use Git for Version Control
 
