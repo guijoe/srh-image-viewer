@@ -241,105 +241,61 @@ class AbdelrahmanImageModule(IImageModule):
             return False, None, {}, None
 
     def process_image(self, image_data: np.ndarray, metadata: dict, params: dict) -> np.ndarray:
-        processed_data = image_data.copy()
+        # 1. Safety Check: If there's no data, return nothing to avoid crashes
+        if image_data is None:
+            return np.zeros((100, 100, 3), dtype=np.uint8)
 
+        # 2. Initialization
+        processed_data = image_data.astype(np.float32)
         operation = params.get('operation')
+        
+        # 3. Axis Detection (Fixes the "Thin Line" issue)
+        # Check if we have (1, H, W) or (H, W, 3)
+        if processed_data.ndim == 3 and processed_data.shape[0] == 1:
+            h_ax, w_ax = 1, 2
+            c_ax = 0
+        elif processed_data.ndim == 3:
+            h_ax, w_ax = 0, 1
+            c_ax = 2
+        else:
+            h_ax, w_ax = 0, 1
+            c_ax = None
 
-        if operation == "Gaussian Blur":
-            sigma = params.get('sigma', 1.0)
-            # skimage.filters.gaussian expects float data
-            processed_data = skimage.filters.gaussian(processed_data.astype(float), sigma=sigma, preserve_range=True)
-        elif operation == "Median Filter":
-            filter_size = params.get('filter_size', 3)
-            if filter_size <= 1: return processed_data # No change
-            # skimage.filters.median
-            if processed_data.ndim == 3 and processed_data.shape[2] in [3, 4]: # RGB/RGBA
-                # Apply to each channel
-                channels = []
-                for i in range(processed_data.shape[2]):
-                    channels.append(skimage.filters.median(processed_data[:,:,i], footprint=skimage.morphology.disk(int(filter_size/2))))
-                processed_data = np.stack(channels, axis=-1)
-            else:
-                processed_data = skimage.filters.median(processed_data, footprint=skimage.morphology.disk(int(filter_size/2)))
-        elif operation == "Sobel Edge Detect":
-            # Sobel works on 2D (grayscale) images. Convert if necessary.
-            if processed_data.ndim == 3 and processed_data.shape[2] in [3, 4]:
-                grayscale_img = rgb2gray(processed_data[:,:,:3])
-            else:
-                grayscale_img = processed_data
-            
-            processed_data = skimage.filters.sobel(grayscale_img)
+        # 4. Operations
+        if operation == "Invert (Negative)":
+            processed_data = 255.0 - processed_data
+
         elif operation == "Geometric":
             t_type = params.get('transform_type')
-
             if t_type == "Horizontal Flip":
-                # Flip along the width axis (axis 1 for HWC or HW)
-                processed_data = np.flip(processed_data, axis=1)
-
+                processed_data = np.flip(processed_data, axis=w_ax)
             elif t_type == "Vertical Flip":
-                # Flip along the height axis (axis 0)
-                processed_data = np.flip(processed_data, axis=0)
-
+                processed_data = np.flip(processed_data, axis=h_ax)
             elif t_type == "Rotate 90° CW":
-                # Rotate 90 degrees clockwise (3 times 90 CCW)
-                processed_data = np.rot90(processed_data, k=-1)
-
+                processed_data = np.rot90(processed_data, k=-1, axes=(h_ax, w_ax))
             elif t_type == "Rotate 90° CCW":
-                # Standard NumPy rotate is CCW
-                processed_data = np.rot90(processed_data, k=1)
-
+                processed_data = np.rot90(processed_data, k=1, axes=(h_ax, w_ax))
             elif t_type == "Rotate 180°":
-                processed_data = np.rot90(processed_data, k=2)
-
-            elif t_type == "Transpose":
-                # Swaps X and Y axes; if 3D (RGB), only swap first two axes
-                if processed_data.ndim == 3:
-                    processed_data = np.transpose(processed_data, (1, 0, 2))
-                else:
-                    processed_data = np.transpose(processed_data)
-        elif operation == "Power Law (Gamma)":
-            gamma = params.get('gamma', 1.0)
-            # Normalize to [0, 1]
-            input_float = processed_data.astype(float)
-            max_val = np.max(input_float)
-            if max_val > 0:
-                normalized = input_float / max_val
-                # Apply gamma correction
-                gamma_corrected = np.power(normalized, gamma)
-                # Scale back to original range
-                processed_data = gamma_corrected * max_val
-        elif operation == "Convolution":
-            kernel = params.get('kernel')
-            if kernel is not None:
-                # Convolve works best on float images
-                input_float = processed_data.astype(float)
-                if input_float.ndim == 3 and input_float.shape[2] in [3, 4]: # RGB/RGBA
-                    channels = []
-                    for i in range(input_float.shape[2]):
-                        channels.append(convolve(input_float[:,:,i], kernel, mode='reflect'))
-                    processed_data = np.stack(channels, axis=-1)
-                else:
-                    processed_data = convolve(input_float, kernel, mode='reflect')
-        elif operation == "Invert (Negative)":
-            # NumPy makes this incredibly simple. 
-            # Subtracting the array from 255 flips the values.
-            processed_data = 255 - processed_data
+                processed_data = np.rot90(processed_data, k=2, axes=(h_ax, w_ax))
 
         elif operation == "Binary Threshold":
             threshold_val = params.get('threshold', 127)
-            
-            # Thresholding works on single-channel images.
-            # If the image is RGB, we convert to grayscale first.
-            if processed_data.ndim == 3 and processed_data.shape[2] in [3, 4]:
-                # Using your existing rgb2gray import
-                gray_img = (rgb2gray(processed_data[:,:,:3]) * 255).astype(np.uint8)
+            # Convert to gray for the math
+            if c_ax is not None:
+                gray = np.mean(processed_data, axis=c_ax)
             else:
-                gray_img = processed_data
+                gray = processed_data
+            
+            binary = (gray > threshold_val).astype(np.float32) * 255.0
+            
+            # Restore original dimensions so Napari doesn't crash
+            if processed_data.ndim == 3:
+                if processed_data.shape[0] == 1:
+                    processed_data = binary[np.newaxis, :, :]
+                else:
+                    processed_data = np.stack([binary] * 3, axis=-1)
+            else:
+                processed_data = binary
 
-            # Create a mask where pixels > threshold are 255 (white), else 0 (black)
-            processed_data = (gray_img > threshold_val).astype(np.uint8) * 255
-
-        # Ensure output data type is consistent (e.g., convert back to uint8 if processing changed it)
-        processed_data = processed_data.astype(image_data.dtype)
-
-        return processed_data
+        # 5. FINAL RETURN (Must be outside all if/elif blocks)
+        return np.clip(processed_data, 0, 255).astype(np.uint8)
