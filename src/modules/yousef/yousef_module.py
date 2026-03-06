@@ -6,16 +6,51 @@ import skimage.filters
 import skimage.morphology
 from skimage.color import rgb2gray
 from scipy.ndimage import convolve
-from skimage import exposure, filters
+
 from modules.i_image_module import IImageModule
 from image_data_store import ImageDataStore
 
 # --- Parameter Widgets for Different Operations ---
+
+def apply_red_tint(img: np.ndarray, strength: float) -> np.ndarray:
+        
+        """Boost red channel by 'strength' (0..1). Keeps dtype like uint8 images."""
+        s = float(np.clip(strength, 0.0, 1.0))
+
+        # Handle grayscale -> RGB
+        if img.ndim == 2:
+            img = np.stack([img, img, img], axis=-1)
+
+        # Handle channel-first grayscale that your loader sometimes creates: (1, H, W)
+        if img.ndim == 3 and img.shape[0] == 1 and img.shape[-1] != 3:
+            gray = img[0]
+            img = np.stack([gray, gray, gray], axis=-1)
+
+        # RGBA support
+        has_alpha = (img.ndim == 3 and img.shape[-1] == 4)
+        alpha = None
+        if has_alpha:
+            alpha = img[..., 3].copy()
+            img = img[..., :3]
+
+        x = img.astype(np.float32)
+
+        # Boost red toward 255; slightly reduce green/blue for a stronger red look
+        x[..., 0] = x[..., 0] + (255.0 - x[..., 0]) * s
+        x[..., 1] = x[..., 1] * (1.0 - 0.25 * s)
+        x[..., 2] = x[..., 2] * (1.0 - 0.25 * s)
+
+        out = np.clip(x, 0, 255).astype(np.uint8)
+
+        if has_alpha:
+            out = np.dstack([out, alpha.astype(np.uint8)])
+
+        return out
+
 class BaseParamsWidget(QWidget):
     """Base class for parameter widgets to ensure a consistent interface."""
     def get_params(self) -> dict:
         raise NotImplementedError
-
 
 class NoParamsWidget(BaseParamsWidget):
     """A placeholder widget for operations with no parameters."""
@@ -29,6 +64,26 @@ class NoParamsWidget(BaseParamsWidget):
 
     def get_params(self) -> dict:
         return {}
+
+class RedTintParamsWidget(BaseParamsWidget):
+    """A widget for Red Tint strength."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        layout.addWidget(QLabel("Red Strength (0.0 - 1.0):"))
+        self.strength_spinbox = QDoubleSpinBox()
+        self.strength_spinbox.setMinimum(0.0)
+        self.strength_spinbox.setMaximum(1.0)
+        self.strength_spinbox.setSingleStep(0.05)
+        self.strength_spinbox.setValue(0.35)
+        layout.addWidget(self.strength_spinbox)
+
+        layout.addStretch()
+
+    def get_params(self) -> dict:
+        return {"strength": self.strength_spinbox.value()}
 
 class GaussianParamsWidget(BaseParamsWidget):
     """A widget for Gaussian blur parameters."""
@@ -47,6 +102,37 @@ class GaussianParamsWidget(BaseParamsWidget):
 
     def get_params(self) -> dict:
         return {'sigma': self.sigma_spinbox.value()}
+
+class ContrastStretchingParamsWidget(BaseParamsWidget):
+    """A widget for Contrast Stretching parameters."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Input for the new minimum value
+        layout.addWidget(QLabel("New Minimum Intensity (0-255):"))
+        self.min_spinbox = QDoubleSpinBox()
+        self.min_spinbox.setMinimum(0.0)
+        self.min_spinbox.setMaximum(255.0)
+        self.min_spinbox.setValue(0.0)
+        layout.addWidget(self.min_spinbox)
+
+        # Input for the new maximum value
+        layout.addWidget(QLabel("New Maximum Intensity (0-255):"))
+        self.max_spinbox = QDoubleSpinBox()
+        self.max_spinbox.setMinimum(0.0)
+        self.max_spinbox.setMaximum(255.0)
+        self.max_spinbox.setValue(255.0)
+        layout.addWidget(self.max_spinbox)
+
+        layout.addStretch()
+
+    def get_params(self) -> dict:
+        return {
+            'new_min': self.min_spinbox.value(),
+            'new_max': self.max_spinbox.value()
+        }
 
 class PowerLawParamsWidget(BaseParamsWidget):
     """A widget for Power Law (Gamma) Transformation."""
@@ -94,32 +180,9 @@ class ConvolutionParamsWidget(BaseParamsWidget):
     def get_params(self) -> dict:
         kernel = np.array([[spinbox.value() for spinbox in row] for row in self.kernel_inputs])
         return {'kernel': kernel}
-class ThresholdParamsWidget(BaseParamsWidget):
-    """A widget for simple binary thresholding."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        layout.addWidget(QLabel("Threshold Value (0-255):"))
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, 255)
-        self.slider.setValue(127)
-        layout.addWidget(self.slider)
-        
-        # Display the current value for better UX
-        self.value_label = QLabel(f"Current: {self.slider.value()}")
-        self.slider.valueChanged.connect(lambda v: self.value_label.setText(f"Current: {v}"))
-        layout.addWidget(self.value_label)
-        layout.addStretch()
 
-    def get_params(self) -> dict:
-        return {'threshold': self.slider.value()}
-
-# Note: Image Inversion doesn't need a new class 
-# we can just use NoParamsWidget since it has no settings.
 # Define a custom control widget
-class AbdelrahmanControlsWidget(QWidget):
+class yousefControlsWidget(QWidget):
     # Signal to request processing from the module manager
     process_requested = Signal(dict)
 
@@ -141,15 +204,14 @@ class AbdelrahmanControlsWidget(QWidget):
         self.params_stack = QStackedWidget()
         layout.addWidget(self.params_stack)
 
-  # Define operations and their corresponding parameter widgets
+        # Define operations and their corresponding parameter widgets
         operations = {
             "Gaussian Blur": GaussianParamsWidget,
             "Sobel Edge Detect": NoParamsWidget,
             "Power Law (Gamma)": PowerLawParamsWidget,
             "Convolution": ConvolutionParamsWidget,
-            "Geometric": GeometricParamsWidget,
-            "Invert (Negative)": NoParamsWidget,       # Added this
-            "Binary Threshold": ThresholdParamsWidget, # Added this
+            "Contrast Stretching": ContrastStretchingParamsWidget,
+            "Red Tint": RedTintParamsWidget,
         }
 
         for name, widget_class in operations.items():
@@ -174,43 +236,25 @@ class AbdelrahmanControlsWidget(QWidget):
     def _on_operation_changed(self, operation_name: str):
         if operation_name in self.param_widgets:
             self.params_stack.setCurrentWidget(self.param_widgets[operation_name])
-class GeometricParamsWidget(BaseParamsWidget):
-    """Widget for flipping and rotating images."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(QLabel("Transformation Type:"))
-        self.type_combo = QComboBox()
-        self.type_combo.addItems([
-            "Horizontal Flip", 
-            "Vertical Flip", 
-            "Rotate 90° CW", 
-            "Rotate 90° CCW", 
-            "Rotate 180°",
-            "Transpose"
-        ])
-        layout.addWidget(self.type_combo)
-        layout.addStretch()
 
-    def get_params(self) -> dict:
-        return {'transform_type': self.type_combo.currentText()}
 
-class AbdelrahmanImageModule(IImageModule):
+
+
+class yousefImageModule(IImageModule):
     def __init__(self):
         super().__init__()
         self._controls_widget = None
 
     def get_name(self) -> str:
-        return "Abdelrahman Module"
+        return "yousef Module"
 
     def get_supported_formats(self) -> list[str]:
         return ["png", "jpg", "jpeg", "bmp", "gif", "tiff"] # Common formats
 
     def create_control_widget(self, parent=None, module_manager=None) -> QWidget:
         if self._controls_widget is None:
-            self._controls_widget = AbdelrahmanControlsWidget(module_manager, parent)
+            self._controls_widget = yousefControlsWidget(module_manager, parent)
             # The widget's signal is connected to the module's handler
             self._controls_widget.process_requested.connect(self._handle_processing_request)
         return self._controls_widget
@@ -220,6 +264,9 @@ class AbdelrahmanImageModule(IImageModule):
         # The control widget now has a valid reference to the module manager
         if self._controls_widget and self._controls_widget.module_manager:
             self._controls_widget.module_manager.apply_processing_to_current_image(params)
+            
+
+
 
     def load_image(self, file_path: str):
         try:
@@ -239,63 +286,103 @@ class AbdelrahmanImageModule(IImageModule):
         except Exception as e:
             print(f"Error loading 2D image {file_path}: {e}")
             return False, None, {}, None
-
-    def process_image(self, image_data: np.ndarray, metadata: dict, params: dict) -> np.ndarray:
-        # 1. Safety Check: If there's no data, return nothing to avoid crashes
-        if image_data is None:
-            return np.zeros((100, 100, 3), dtype=np.uint8)
-
-        # 2. Initialization
-        processed_data = image_data.astype(np.float32)
-        operation = params.get('operation')
         
-        # 3. Axis Detection (Fixes the "Thin Line" issue)
-        # Check if we have (1, H, W) or (H, W, 3)
-        if processed_data.ndim == 3 and processed_data.shape[0] == 1:
-            h_ax, w_ax = 1, 2
-            c_ax = 0
-        elif processed_data.ndim == 3:
-            h_ax, w_ax = 0, 1
-            c_ax = 2
-        else:
-            h_ax, w_ax = 0, 1
-            c_ax = None
+   
 
-        # 4. Operations
-        if operation == "Invert (Negative)":
-            processed_data = 255.0 - processed_data
+        # ... (keep the other elif blocks correctionfor other operations if necessary)
 
-        elif operation == "Geometric":
-            t_type = params.get('transform_type')
-            if t_type == "Horizontal Flip":
-                processed_data = np.flip(processed_data, axis=w_ax)
-            elif t_type == "Vertical Flip":
-                processed_data = np.flip(processed_data, axis=h_ax)
-            elif t_type == "Rotate 90° CW":
-                processed_data = np.rot90(processed_data, k=-1, axes=(h_ax, w_ax))
-            elif t_type == "Rotate 90° CCW":
-                processed_data = np.rot90(processed_data, k=1, axes=(h_ax, w_ax))
-            elif t_type == "Rotate 180°":
-                processed_data = np.rot90(processed_data, k=2, axes=(h_ax, w_ax))
+      
+    
+    
+    def process_image(self, image_data: np.ndarray, metadata: dict, params: dict) -> np.ndarray:
+        processed_data = image_data.copy()
 
-        elif operation == "Binary Threshold":
-            threshold_val = params.get('threshold', 127)
-            # Convert to gray for the math
-            if c_ax is not None:
-                gray = np.mean(processed_data, axis=c_ax)
+        operation = params.get('operation')
+
+        if operation == "Gaussian Blur":
+            sigma = params.get('sigma', 1.0)
+            # skimage.filters.gaussian expects float data
+            processed_data = skimage.filters.gaussian(processed_data.astype(float), sigma=sigma, preserve_range=True)
+        elif operation == "Median Filter":
+            filter_size = params.get('filter_size', 3)
+            if filter_size <= 1: return processed_data # No change
+            # skimage.filters.median
+            if processed_data.ndim == 3 and processed_data.shape[2] in [3, 4]: # RGB/RGBA
+                # Apply to each channel
+                channels = []
+                for i in range(processed_data.shape[2]):
+                    channels.append(skimage.filters.median(processed_data[:,:,i], footprint=skimage.morphology.disk(int(filter_size/2))))
+                processed_data = np.stack(channels, axis=-1)
             else:
-                gray = processed_data
+                processed_data = skimage.filters.median(processed_data, footprint=skimage.morphology.disk(int(filter_size/2)))
+        elif operation == "Sobel Edge Detect":
+            # Sobel works on 2D (grayscale) images. Convert if necessary.
+            if processed_data.ndim == 3 and processed_data.shape[2] in [3, 4]:
+                grayscale_img = rgb2gray(processed_data[:,:,:3])
+            else:
+                grayscale_img = processed_data
             
-            binary = (gray > threshold_val).astype(np.float32) * 255.0
-            
-            # Restore original dimensions so Napari doesn't crash
-            if processed_data.ndim == 3:
-                if processed_data.shape[0] == 1:
-                    processed_data = binary[np.newaxis, :, :]
+            processed_data = skimage.filters.sobel(grayscale_img)
+        
+        elif operation == "Red Tint":
+            strength = params.get("strength", 0.35)
+            processed_data = apply_red_tint(processed_data, strength)
+        
+        elif operation == "Power Law (Gamma)":
+            gamma = params.get('gamma', 1.0)
+            # Normalize to [0, 1]
+            input_float = processed_data.astype(float)
+            max_val = np.max(input_float)
+            if max_val > 0:
+                normalized = input_float / max_val
+                # Apply gamma correction
+                gamma_corrected = np.power(normalized, gamma)
+                # Scale back to original range
+                processed_data = gamma_corrected * max_val
+        elif operation == "Convolution":
+            kernel = params.get('kernel')
+            if kernel is not None:
+                # Convolve works best on float images
+                input_float = processed_data.astype(float)
+                if input_float.ndim == 3 and input_float.shape[2] in [3, 4]: # RGB/RGBA
+                    channels = []
+                    for i in range(input_float.shape[2]):
+                        channels.append(convolve(input_float[:,:,i], kernel, mode='reflect'))
+                    processed_data = np.stack(channels, axis=-1)
                 else:
-                    processed_data = np.stack([binary] * 3, axis=-1)
-            else:
-                processed_data = binary
+                    processed_data = convolve(input_float, kernel, mode='reflect')
+            elif operation == "Contrast Stretching":
+            # Ensure we are working with a floating point image for calculations
+                img_float = processed_data.astype(float)
 
-        # 5. FINAL RETURN (Must be outside all if/elif blocks)
-        return np.clip(processed_data, 0, 255).astype(np.uint8)
+            # Get parameters from the UI
+            new_min = params.get('new_min', 0.0)
+            new_max = params.get('new_max', 255.0)
+
+            # Get current image intensity range
+            current_min = np.min(img_float)
+            current_max = np.max(img_float)
+
+            # Avoid division by zero if the image is flat
+            if current_max == current_min:
+                return processed_data # Return original image
+
+            # Apply the linear stretching formula
+            processed_data = (img_float - current_min) * \
+                             ((new_max - new_min) / (current_max - current_min)) + new_min
+
+            # Clip values to be safe, though the formula should handle it
+            processed_data = np.clip(processed_data, new_min, new_max)
+
+        # ... (keep the rest of the function)
+
+        # Ensure output data type is consistent
+        processed_data = processed_data.astype(image_data.dtype)
+
+        return processed_data
+
+
+        # Ensure output data type is consistent (e.g., convert back to uint8 if processing changed it)
+        processed_data = processed_data.astype(image_data.dtype)
+
+        return processed_data
