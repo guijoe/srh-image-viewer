@@ -8,6 +8,7 @@ from skimage.color import rgb2gray
 from scipy.ndimage import convolve
 from skimage import exposure
 
+
 from modules.i_image_module import IImageModule
 from image_data_store import ImageDataStore
 
@@ -94,6 +95,39 @@ class ConvolutionParamsWidget(BaseParamsWidget):
     def get_params(self) -> dict:
         kernel = np.array([[spinbox.value() for spinbox in row] for row in self.kernel_inputs])
         return {'kernel': kernel}
+    
+class FixContrastEdgesParamsWidget(BaseParamsWidget):
+    """A widget for Fix Contrast + Detect Edges parameters."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        label = QLabel("This operation automatically improves contrast and then detects edges.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        layout.addStretch()
+
+    def get_params(self) -> dict:
+        return {}
+
+
+class SharpenLegibilityParamsWidget(BaseParamsWidget):
+    """A widget for Sharpen for Legibility parameters."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        label = QLabel("This operation sharpens the image to make details easier to read.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        layout.addStretch()
+
+    def get_params(self) -> dict:
+        return {}
 
 # Define a custom control widget
 class DavidControlsWidget(QWidget):
@@ -251,17 +285,21 @@ class DavidImageModule(IImageModule):
             # Convert to grayscale
             if processed_data.ndim == 3 and processed_data.shape[2] in [3, 4]:
                 gray = rgb2gray(processed_data[:, :, :3])
+                
+                gray_float = gray.astype(float)
             else:
                 gray = processed_data.astype(float)
 
-            # If grayscale is 0..255, scale to 0..1 for exposure functions
-                gray_float = gray.astype(float)
+            gray_float = gray.astype(float)
+            
             if np.max(gray_float) > 1.0:
                 gray_float = gray_float / 255.0
 
             # Improve contrast, then detect edges
             enhanced = exposure.equalize_hist(gray_float)
-            processed_data = skimage.filters.sobel(enhanced)
+            processed_data = processed_data * 255
+            processed_data = np.clip(processed_data, 0, 255)
+            processed_data = processed_data.astype(image_data.dtype)
             
         elif operation == "Sharpen for Readability":
             kernel = np.array([
